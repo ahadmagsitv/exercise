@@ -1,0 +1,273 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Exercise Counter</title>
+<style>
+  :root { --accent:#6366f1; --card:#14141c; --border:rgba(255,255,255,.08); }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:radial-gradient(circle at 15% 20%,#1a1a2e,#0a0a0f 60%); color:#e8e8ef; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; display:flex; align-items:center; justify-content:center; }
+  #app { display:flex; gap:28px; align-items:center; padding:24px; }
+  #wrap { position:relative; height:90vh; aspect-ratio:3/4; max-width:92vw; background:#000; border-radius:28px; overflow:hidden; box-shadow:0 25px 70px rgba(0,0,0,.55), 0 0 0 1px var(--border); transition:box-shadow .2s; }
+  #wrap.error { box-shadow:0 25px 70px rgba(0,0,0,.55), 0 0 0 3px #ef4444; }
+  #wrap video, #wrap canvas { width:100%; height:100%; position:absolute; inset:0; object-fit:cover; }
+  #wrap video { transform:scaleX(-1); }
+  #idle-screen { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; background:linear-gradient(160deg,#1c1c28,#0a0a0f); text-align:center; padding:24px; }
+  #idle-screen h1 { margin:0; font-size:22px; font-weight:600; }
+  #idle-screen p { margin:0; color:#8b8b9a; font-size:14px; }
+  #overlay { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; padding:24px; pointer-events:none; background:linear-gradient(to top, rgba(0,0,0,.65), transparent 35%); }
+  #overlay h2 { margin:0 0 6px; font-size:24px; font-weight:600; text-shadow:0 2px 6px #000; }
+  #overlay p { margin:0; font-size:13px; color:#d1d1db; text-align:center; max-width:85%; text-shadow:0 2px 6px #000; }
+  #overlay p.error { color:#ff8a80; font-weight:600; }
+  #overlay .count { font-size:56px; font-weight:700; margin-top:8px; letter-spacing:-1px; text-shadow:0 2px 6px #000; }
+  button.primary { font-size:16px; font-weight:600; padding:12px 28px; border-radius:12px; border:none; background:var(--accent); color:#fff; cursor:pointer; box-shadow:0 8px 24px rgba(99,102,241,.4); }
+  button.primary:hover { filter:brightness(1.1); }
+  #panel { width:280px; background:var(--card); border:1px solid var(--border); border-radius:20px; padding:20px; display:flex; flex-direction:column; gap:10px; box-shadow:0 20px 50px rgba(0,0,0,.4); align-self:stretch; margin:40px 0; }
+  #panel h3 { margin:0 0 4px; font-size:13px; font-weight:600; color:#a0a0b0; text-transform:uppercase; letter-spacing:.06em; }
+  .row { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; border-radius:12px; background:rgba(255,255,255,.02); }
+  .row.active { background:rgba(99,102,241,.12); box-shadow:0 0 0 1px rgba(99,102,241,.3); }
+  .row .name { display:flex; align-items:center; gap:10px; font-size:14px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:#3a3a46; flex:none; }
+  .row.active .dot { background:var(--accent); box-shadow:0 0 0 4px rgba(99,102,241,.25); }
+  .row .score { font-variant-numeric:tabular-nums; font-size:14px; color:#8b8b9a; font-weight:600; }
+  button.reset { margin-top:8px; font-size:14px; font-weight:600; padding:10px; border-radius:12px; border:1px solid var(--border); background:transparent; color:#c5c5d2; cursor:pointer; }
+  button.reset:hover { background:rgba(255,255,255,.05); border-color:#4a4a5a; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18",
+    "react/jsx-runtime": "https://esm.sh/react@18/jsx-runtime",
+    "react-dom/client": "https://esm.sh/react-dom@18/client",
+    "@mediapipe/tasks-vision": "https://esm.sh/@mediapipe/tasks-vision@0.10.14"
+  }
+}
+</script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel" data-type="module" data-presets="react">
+import React, { useState, useRef, useCallback } from "react";
+import { createRoot } from "react-dom/client";
+import { PoseLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
+
+// minimal 3D vector helpers — world landmarks are real (x,y,z) meters, not screen pixels
+const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
+const dot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
+const cross = (a, b) => ({ x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x });
+const norm = v => Math.hypot(v.x, v.y, v.z);
+const unit = v => { const n = norm(v) || 1; return { x: v.x / n, y: v.y / n, z: v.z / n }; };
+// component of v lying in the plane perpendicular to `axis` (i.e. v with the axis direction removed)
+const flatten = (v, axis) => sub(v, { x: axis.x * dot(v, axis), y: axis.y * dot(v, axis), z: axis.z * dot(v, axis) });
+// true 3D angle between two vectors, in degrees — coordinate-frame agnostic, unlike picking
+// two of the three axes off screen-space landmarks (which is what this used to do)
+function angle3(v1, v2) {
+  const m = norm(v1) * norm(v2);
+  return m === 0 ? 0 : Math.acos(Math.max(-1, Math.min(1, dot(v1, v2) / m))) * 180 / Math.PI;
+}
+// local torso axes from world landmarks: up (hip->shoulder), right (shoulder line, leveled off `up`),
+// forward (out of the chest). Body-relative, so it's correct regardless of which way the camera faces —
+// used to split "raise arm" into its sideways (abduction) vs forward (flexion) component.
+function armFrame(wlm) {
+  const up = unit(sub(wlm[12], wlm[24]));
+  const right = unit(flatten(sub(wlm[12], wlm[11]), up));
+  const forward = unit(cross(right, up));
+  return { right, forward };
+}
+// tilt of the shoulder-hip line off vertical, in the plane given by k1/k2 (screen-space landmarks)
+function tilt(shoulder, hip, k1, k2) {
+  return Math.abs(Math.atan2(shoulder[k1] - hip[k1], hip[k2] - shoulder[k2]) * 180 / Math.PI);
+}
+// ponytail: right-side landmarks only. Squat/abduction/flexion read world (real 3D meter)
+// landmarks, so they're camera-angle independent. Lateral flexion/rotation/extension still lean
+// on MediaPipe's screen-space z, which is a rough monocular estimate, not true depth — that needs
+// a calibrated "which way is vertical" reference (gravity or a captured rest pose) to do properly
+// in 3D, which this doesn't have; left as-is rather than guessing an unverified fix.
+const EXERCISES = [
+  { key: "squat", name: "Chair Squat", instruction: "Squat down, then stand back up.", needsWorld: true,
+    points: [24, 26, 28], metric: (lm, wlm) => angle3(sub(wlm[24], wlm[26]), sub(wlm[28], wlm[26])),
+    activeWhen: "below", restValue: 160, activeValue: 110 },
+  { key: "abduction", name: "Abduction", instruction: "Raise your arm out to the side, then lower it.", needsWorld: true,
+    points: [24, 12, 16], metric: (lm, wlm) => angle3(sub(wlm[24], wlm[12]), flatten(sub(wlm[16], wlm[12]), armFrame(wlm).forward)),
+    activeWhen: "above", restValue: 30, activeValue: 80 },
+  { key: "flexion", name: "Flexion", instruction: "Raise your arm forward, then lower it.", needsWorld: true,
+    points: [24, 12, 16], metric: (lm, wlm) => angle3(sub(wlm[24], wlm[12]), flatten(sub(wlm[16], wlm[12]), armFrame(wlm).right)),
+    activeWhen: "above", restValue: 30, activeValue: 80 },
+  { key: "lateralFlexion", name: "Lateral Flexion", instruction: "Face the camera. Bend sideways at the waist, then return.",
+    points: [12, 24], metric: lm => tilt(lm[12], lm[24], "x", "y"), activeWhen: "above", restValue: 8, activeValue: 20 },
+  { key: "rotation", name: "Rotation", instruction: "Face the camera. Twist your shoulders, then return.",
+    points: [11, 12], metric: lm => Math.abs(lm[11].z - lm[12].z) * 100, activeWhen: "above", restValue: 5, activeValue: 15 },
+  { key: "extension", name: "Extension", instruction: "Face the camera. Lean back, then return to standing.",
+    points: [12, 24], metric: lm => tilt(lm[12], lm[24], "z", "y"), activeWhen: "above", restValue: 5, activeValue: 15 },
+];
+function App() {
+  const [stage, setStage] = useState("idle"); // idle | running
+  const [reps, setReps] = useState(() => EXERCISES.map(() => 0));
+  const [activeIdx, setActiveIdx] = useState(-1); // which exercise is mid-rep right now, -1 = none
+  const [poseOk, setPoseOk] = useState(true); // is a person visible at all
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const landmarkerRef = useRef(null);
+  const phaseRef = useRef(EXERCISES.map(() => "rest")); // per-exercise rest/active state, tracked independently
+  const smoothRef = useRef(EXERCISES.map(() => null)); // ponytail: EMA over raw per-frame metric, landmark jitter alone was crossing thresholds
+  const repsRef = useRef(EXERCISES.map(() => 0)); // mirrors reps state for the rAF loop
+  const activeRef = useRef(-1); // mirrors activeIdx for the rAF loop
+  const poseOkRef = useRef(true);
+  const runningRef = useRef(false); // lets reset() stop the rAF loop without waiting for a re-render
+
+  const loop = useCallback(() => {
+    const video = videoRef.current;
+    const landmarker = landmarkerRef.current;
+    if (!runningRef.current || !video || !landmarker) return;
+    const now = performance.now();
+    const result = landmarker.detectForVideo(video, now);
+    const lm = result.landmarks && result.landmarks[0];
+    const wlm = result.worldLandmarks && result.worldLandmarks[0];
+
+    if (!!lm !== poseOkRef.current) { poseOkRef.current = !!lm; setPoseOk(!!lm); }
+
+    // canvas's pixel buffer matches the video's native resolution, so the same object-fit:cover
+    // CSS the video uses scales/crops the canvas identically — no manual crop math needed.
+    const canvas = canvasRef.current;
+    const ctx = canvas && canvas.getContext("2d");
+    if (ctx && video.videoWidth) {
+      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+      }
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    if (lm) {
+      let changed = false;
+      let nowActive = -1;
+      // every exercise is evaluated every frame — whichever one crosses active->rest gets its own
+      // rep counted, so the user can do them in any order without picking one first.
+      // ponytail: several exercises read overlapping landmarks, so more than one can flag "active"
+      // in the same frame; the overlay/skeleton just shows the last match found. Fine for a single
+      // demo user — add view-direction disambiguation if cross-triggering shows up in practice.
+      EXERCISES.forEach((ex, i) => {
+        // visibility = not occluded, presence = actually in frame — a joint can pass one and fail the other
+        const ok = ex.points.every(idx => (lm[idx].visibility ?? 1) > 0.5 && (lm[idx].presence ?? 1) > 0.5);
+        if (!ok) return;
+        if (ex.needsWorld && !wlm) return; // world landmarks missing this frame — skip rather than crash
+        const raw = ex.metric(lm, wlm);
+        const s = smoothRef.current[i] == null ? raw : smoothRef.current[i] * 0.75 + raw * 0.25;
+        smoothRef.current[i] = s;
+
+        const isActive = ex.activeWhen === "below" ? s < ex.activeValue : s > ex.activeValue;
+        const isRest = ex.activeWhen === "below" ? s > ex.restValue : s < ex.restValue;
+        if (phaseRef.current[i] === "rest" && isActive) {
+          phaseRef.current[i] = "active";
+        } else if (phaseRef.current[i] === "active" && isRest) {
+          phaseRef.current[i] = "rest";
+          repsRef.current[i] += 1;
+          changed = true;
+        }
+        if (phaseRef.current[i] === "active") {
+          nowActive = i;
+          if (ctx) {
+            // flip x to match the mirrored (scaleX(-1)) video so dots land on the real limb
+            const pts = ex.points.map(idx => [(1 - lm[idx].x) * canvas.width, lm[idx].y * canvas.height]);
+            ctx.strokeStyle = "#4f7cff"; ctx.lineWidth = 4; ctx.fillStyle = "#fff";
+            ctx.beginPath();
+            pts.forEach(([x, y], k) => k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y));
+            ctx.stroke();
+            pts.forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI * 2); ctx.fill(); });
+          }
+        }
+      });
+      if (changed) setReps([...repsRef.current]);
+      if (nowActive !== activeRef.current) { activeRef.current = nowActive; setActiveIdx(nowActive); }
+    }
+    requestAnimationFrame(loop);
+  }, []);
+
+  const start = async () => {
+    const fileset = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+    );
+    landmarkerRef.current = await PoseLandmarker.createFromOptions(fileset, {
+      baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+        delegate: "GPU",
+      },
+      runningMode: "VIDEO",
+      numPoses: 1,
+    });
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    videoRef.current.srcObject = stream;
+    await videoRef.current.play();
+    phaseRef.current = EXERCISES.map(() => "rest");
+    smoothRef.current = EXERCISES.map(() => null);
+    repsRef.current = EXERCISES.map(() => 0);
+    activeRef.current = -1;
+    poseOkRef.current = true;
+    setReps(repsRef.current);
+    setActiveIdx(-1);
+    setPoseOk(true);
+    runningRef.current = true;
+    setStage("running");
+    requestAnimationFrame(loop);
+  };
+
+  const reset = () => {
+    runningRef.current = false;
+    const stream = videoRef.current && videoRef.current.srcObject;
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    phaseRef.current = EXERCISES.map(() => "rest");
+    smoothRef.current = EXERCISES.map(() => null);
+    repsRef.current = EXERCISES.map(() => 0);
+    activeRef.current = -1;
+    poseOkRef.current = true;
+    setReps(repsRef.current);
+    setActiveIdx(-1);
+    setPoseOk(true);
+    setStage("idle");
+  };
+
+  const ex = activeIdx >= 0 ? EXERCISES[activeIdx] : null;
+  return (
+    <div id="app">
+      <div id="wrap" className={stage === "running" && !poseOk ? "error" : ""}>
+        <video ref={videoRef} muted playsInline style={{ display: stage === "running" ? "block" : "none" }} />
+        <canvas ref={canvasRef} style={{ display: stage === "running" ? "block" : "none" }} />
+        {stage !== "running" && (
+          <div id="idle-screen">
+            <h1>Exercise Counter</h1>
+            <p>Pose-tracked reps, right from your camera. Do any exercise, any order.</p>
+            <button className="primary" onClick={start}>Start</button>
+          </div>
+        )}
+        {stage === "running" && (
+          <div id="overlay">
+            {poseOk ? (
+              <>
+                <h2>{ex ? ex.name : "Ready"}</h2>
+                <p>{ex ? "Rep in progress…" : "Perform any exercise from the list on the right."}</p>
+              </>
+            ) : <p className="error">Can't see you — step into frame.</p>}
+          </div>
+        )}
+      </div>
+      <div id="panel">
+        <h3>Exercises</h3>
+        {EXERCISES.map((e, i) => (
+          <div key={e.key} className={"row" + (i === activeIdx ? " active" : "")}>
+            <span className="name"><span className="dot" />{e.name}</span>
+            <span className="score">{reps[i]}</span>
+          </div>
+        ))}
+        <button className="reset" onClick={reset}>Reset</button>
+      </div>
+    </div>
+  );
+}
+
+createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
