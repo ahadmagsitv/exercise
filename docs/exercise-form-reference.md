@@ -173,7 +173,7 @@ Sources: [Measurement of Shoulder Abduction Angle with Posture Estimation AI (PM
 
 | Exercise | Metric | rest | active | minROM | targetROM | Clinical normal |
 |---|---|---|---|---|---|---|
-| Chair Squat | interior hip–knee–ankle angle | 160° | 130° | 105° | 90° | 90° interior = parallel |
+| Chair Squat | interior hip–knee–ankle angle | 150° | 130° | 105° | 90° | 90° interior = parallel |
 | Abduction | arm vs trunk axis, frontal plane | 30° | 80° | 90° | 140° | 180° |
 | Flexion | arm vs trunk axis, sagittal plane | 30° | 80° | 90° | 140° | 180° |
 | Lateral Flexion | trunk lean along calibrated right axis | 8° | 15° | 20° | 30° | 35° |
@@ -243,6 +243,55 @@ extension.
 Calibration restarts itself if the user leaves frame mid-capture — a half-captured baseline is
 worse than none, because every rule is expressed as a deviation from it.
 
+### Only the squat needs legs
+
+Requiring the whole body made the app unusable at a desk, which is where most people first open
+it. But of the six exercises, **only the squat reads anything below the hips**. The other five
+need shoulders, hips, and (for the arm raises) one elbow and wrist.
+
+So calibration requires the **torso only**. Legs are optional:
+
+| | legs in frame | legs not in frame |
+|---|---|---|
+| Calibration | requires a standing pose | accepts the user's neutral seated torso |
+| `cal.hasLegs` | `true` | `false` |
+| `cal.kneeR` / `kneeL` / `hipOverAnkle` | measured | **`null`**, never `0` |
+| Chair Squat | available | dimmed, "your legs and feet in frame" |
+| Other five | available | available |
+
+Each exercise declares a `needs` array of the landmarks its metric *and its rules* actually
+read — not just the two or three that get drawn — and is gated on those every frame. The panel
+dims what is unavailable and says what would enable it.
+
+Two rules depend on leg baselines and become no-ops rather than misfiring when there are none:
+Lateral Flexion's `hips` (no ankle reference to measure a shift against) and Extension's `knees`.
+
+Leg-derived baselines are `null` rather than `0` for the usual reason: a `0` reads as a real
+measurement and would silently poison the valgus and hip-shift rules.
+
+### Calibration must say why it is blocked
+
+`calibrationBlocker(lm, wlm)` returns an actionable sentence, or `null` when ready, and the
+calibration screen shows it. Gates, in order: pose present → **legs and feet** visible and inside
+the frame → whole body visible and inside the frame → standing (both knees above
+`STANDING_INTERIOR` = 150°).
+
+This exists because the first live test sat at 0% forever with no explanation. The user was
+seated at a desk, so MediaPipe was extrapolating their legs at low confidence — correctly
+refused, but indistinguishable from a broken app. A progress bar stuck at zero with no reason is
+the worst failure mode here.
+
+Note that MediaPipe *extrapolates* joints it cannot see rather than omitting them, so an
+out-of-shot leg arrives either as a low-confidence landmark or as coordinates outside 0…1. Both
+are checked.
+
+| Situation | Message |
+|---|---|
+| No pose at all | "I can't see anyone — step into view." |
+| Seated / legs not visible | "Step back so your legs and feet are in frame — sitting at a desk won't work." |
+| Torso partly out of frame | "Step back so your whole body is in frame." |
+| Visible but crouching | "Stand up straight to start." |
+
 **Axis signs are verified**, not assumed: `tests/geometry-check.js` asserts `up = -y`,
 `right = -x` (the person's own right), and `forward = -z` (anterior, toward the camera), and
 separately asserts that leaning *forward* does not register as trunk extension. If MediaPipe
@@ -288,12 +337,22 @@ geometry identically.
 
 Three findings that synthetic poses could never have produced:
 
-1. **`restValue: 160` is too strict for real movement — 7 of 17 clips (41%) never close a rep.**
-   The rep only completes when the knee returns above 160° interior (under 20° of flexion). On
-   real recordings people finish a squat without fully locking out, so the rep stays open
-   forever and is never counted or graded. SquatWell's equivalent threshold is 150°, and it
-   detects a rep in every one of the same clips. This is the single highest-impact threshold in
-   the file and it is currently costing 41% of reps.
+1. **`restValue` was 160 and lost 41% of reps — now 150. FIXED.**
+   A rep only completes when the knee returns above `restValue`. At 160° interior (under 20° of
+   flexion) that demanded a near-lockout, and real people finish a squat without locking out, so
+   the rep stayed open forever — never counted, never graded, no feedback at all. 7 of 17 clips
+   were affected. SquatWell's equivalent threshold is 150°.
+
+   Lowered to 150°, which also aligns it with `STANDING_INTERIOR`, the definition calibration
+   uses, so "standing enough to calibrate" and "standing enough to end a rep" cannot drift apart.
+
+   | | 160° | 150° |
+   |---|---|---|
+   | clips producing a rep | 10 / 17 | **14 / 17** |
+   | reps never closing | 7 | **3** |
+
+   The 3 that remain (`IMG_3547`, `IMG_3549_3`, `Walter_squat_5`) genuinely end while the person
+   is still down — there is no return-to-standing in the recording to detect.
 
 2. **A rule could be recorded twice in one rep.** If a rule failed, recovered, then failed again,
    the streak hit `VIOLATION_FRAMES` a second time and pushed a duplicate label — `IMG_2522`

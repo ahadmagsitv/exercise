@@ -42,6 +42,9 @@
   #panel h3 { margin:0 0 4px; font-size:13px; font-weight:600; color:#a0a0b0; text-transform:uppercase; letter-spacing:.06em; }
   .row { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 12px; border-radius:12px; background:rgba(255,255,255,.02); }
   .row.active { background:rgba(99,102,241,.12); box-shadow:0 0 0 1px rgba(99,102,241,.3); }
+  /* exercise whose landmarks aren't all in frame — shown, but visibly not in play */
+  .row.off { opacity:.4; }
+  .row.off .peak { color:#8b8b9a; font-style:italic; }
   .row .name { display:flex; align-items:center; gap:10px; font-size:14px; min-width:0; }
   .row .name span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .dot { width:8px; height:8px; border-radius:50%; background:#3a3a46; flex:none; }
@@ -55,6 +58,41 @@
   .legend b { color:#86efac; font-weight:600; }
   button.reset { margin-top:8px; font-size:14px; font-weight:600; padding:10px; border-radius:12px; border:1px solid var(--border); background:transparent; color:#c5c5d2; cursor:pointer; }
   button.reset:hover { background:rgba(255,255,255,.05); border-color:#4a4a5a; }
+  button.ghost { font-size:13px; font-weight:600; padding:8px 16px; border-radius:10px; border:1px solid var(--border); background:transparent; color:#a8a8b8; cursor:pointer; }
+  button.ghost:hover { background:rgba(255,255,255,.05); color:#e8e8ef; }
+  .row { cursor:pointer; }
+  .row:hover { background:rgba(255,255,255,.05); }
+  .row .help { flex:none; width:15px; height:15px; border-radius:50%; font-size:10px; font-weight:700;
+               line-height:15px; text-align:center; color:#6b6b7a; border:1px solid #3a3a46; }
+  .row:hover .help { color:#c5c5d2; border-color:#6b6b7a; }
+  /* how-to sheet */
+  #guide { position:fixed; inset:0; z-index:20; display:flex; align-items:center; justify-content:center;
+           padding:24px; background:rgba(4,4,10,.72); backdrop-filter:blur(6px); }
+  #guide .sheet { width:min(920px,100%); max-height:88vh; overflow-y:auto; background:var(--card);
+                  border:1px solid var(--border); border-radius:22px; padding:24px 26px 20px;
+                  box-shadow:0 30px 80px rgba(0,0,0,.6); }
+  #guide .sheet-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
+  #guide h2 { margin:0; font-size:19px; font-weight:600; }
+  #guide .close { background:transparent; border:none; color:#8b8b9a; font-size:26px; line-height:1;
+                  cursor:pointer; padding:0 4px; }
+  #guide .close:hover { color:#e8e8ef; }
+  #guide .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; }
+  #guide .cards.single { grid-template-columns:minmax(0,300px); justify-content:center; }
+  #guide .card { background:rgba(255,255,255,.03); border:1px solid var(--border); border-radius:16px;
+                 padding:14px; display:flex; flex-direction:column; gap:5px; }
+  #guide .card h4 { margin:6px 0 0; font-size:14px; font-weight:600; }
+  #guide .card p { margin:0; font-size:12px; line-height:1.45; }
+  #guide .card .what { color:#c5c5d2; }
+  #guide .card .cue { color:#fcd34d; }
+  #guide .card .view { color:#6b6b7a; font-size:11px; }
+  /* push the link to the card's floor so a longer cue can't leave the row ragged */
+  #guide .card a { margin-top:auto; padding-top:6px; font-size:12px; font-weight:600; color:#a5b4fc; text-decoration:none; }
+  #guide .card a:hover { text-decoration:underline; }
+  #guide .note { margin:18px 0 0; font-size:12px; line-height:1.5; color:#8b8b9a; }
+  #guide .note b { color:#c5c5d2; }
+  svg.demo { width:100%; height:130px; background:rgba(0,0,0,.28); border-radius:11px; }
+  svg.demo .fig { stroke:var(--accent); stroke-width:5; stroke-linecap:round; stroke-linejoin:round; }
+  svg.demo .floor { stroke:#3a3a46; stroke-width:2; stroke-linecap:round; }
 </style>
 </head>
 <body>
@@ -148,23 +186,59 @@ const trunkVec = wlm => sub(mid(wlm[11], wlm[12]), mid(wlm[23], wlm[24]));
 // One second of relaxed standing gives us their body axes plus the personal baselines that the
 // valgus / shrug / hip-shift rules are expressed as deviations from.
 const CALIB_FRAMES = 30;
+// The torso is the only hard requirement: it defines the body axes every metric is measured
+// against. Legs are optional — without them the squat is unavailable, but the five arm and
+// trunk exercises need nothing below the hips, so a user sitting at a desk can still train.
+const TORSO_JOINTS = [11, 12, 23, 24];
+const LEG_JOINTS = [25, 26, 27, 28];
+// MediaPipe extrapolates joints it cannot see rather than omitting them, so an out-of-shot limb
+// arrives either as a low-confidence landmark or as coordinates outside 0…1. Check both.
+const seen = (lm, i) => (lm[i].visibility ?? 1) > 0.6 && (lm[i].presence ?? 1) > 0.6
+  && lm[i].x >= 0 && lm[i].x <= 1 && lm[i].y >= 0 && lm[i].y <= 1;
+const allSeen = (lm, idxs) => idxs.every(i => seen(lm, i));
+// Standing = under 30° of knee flexion, i.e. interior angle above 150°. Same definition the
+// rep detector's restValue uses, so "standing enough to calibrate" and "standing enough to end
+// a rep" cannot drift apart.
+const STANDING_INTERIOR = 150;
+// Why calibration is not progressing, as something the user can act on — or null when ready.
+// A progress bar that sits at 0% with no explanation is the worst possible failure here: the
+// user cannot tell a broken app from a badly-framed one.
+function calibrationBlocker(lm, wlm) {
+  if (!lm || !wlm) return "I can't see anyone — step into view.";
+  if (!allSeen(lm, TORSO_JOINTS))
+    return "I need to see your shoulders and hips — move back a little.";
+  // Only demand a standing pose when the legs are actually visible. If they are not, the user
+  // is seated or close to the camera; their neutral seated torso is a perfectly good reference
+  // for the arm and trunk exercises, which is all that will be offered to them.
+  if (allSeen(lm, LEG_JOINTS) &&
+      (jointAngle(wlm, 24, 26, 28) < STANDING_INTERIOR || jointAngle(wlm, 23, 25, 27) < STANDING_INTERIOR))
+    return "Stand up straight to start.";
+  return null;
+}
 function calibSample(lm, wlm) {
   const f = bodyFrame(wlm);
   const span = Math.abs(lm[12].x - lm[11].x) || 1e-3;
+  // Leg-derived baselines are null, not 0, when the legs are out of frame — a 0 would read as a
+  // real measurement and silently poison the valgus and hip-shift rules.
+  const legs = allSeen(lm, LEG_JOINTS);
   return {
     up: f.up, right: f.right,
     hipRight: unit(flatten(sub(wlm[24], wlm[23]), f.up)),
     torso: norm(sub(wlm[12], wlm[24])),
-    kneeR: kneeDev(wlm, f.right, 24, 26, 28),
-    kneeL: kneeDev(wlm, f.right, 23, 25, 27),
-    hipOverAnkle: ((lm[23].x + lm[24].x) / 2 - (lm[27].x + lm[28].x) / 2) / span,
-    span,
+    kneeR: legs ? kneeDev(wlm, f.right, 24, 26, 28) : null,
+    kneeL: legs ? kneeDev(wlm, f.right, 23, 25, 27) : null,
+    hipOverAnkle: legs ? ((lm[23].x + lm[24].x) / 2 - (lm[27].x + lm[28].x) / 2) / span : null,
+    span, legs,
   };
 }
 function buildCalibration(samples) {
   const n = samples.length;
   const avgV = k => unit(samples.reduce((acc, s) => add(acc, s[k]), { x: 0, y: 0, z: 0 }));
-  const avgN = k => samples.reduce((acc, s) => acc + s[k], 0) / n;
+  // skip nulls so a leg-derived baseline stays null rather than becoming NaN
+  const avgN = k => {
+    const v = samples.map(s => s[k]).filter(x => x != null);
+    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+  };
   const up = avgV("up");
   const right = unit(flatten(avgV("right"), up)); // re-orthonormalise after averaging
   return {
@@ -172,6 +246,8 @@ function buildCalibration(samples) {
     hipRight: unit(flatten(avgV("hipRight"), up)),
     torso: avgN("torso"), kneeR: avgN("kneeR"), kneeL: avgN("kneeL"),
     hipOverAnkle: avgN("hipOverAnkle"), span: avgN("span"),
+    // whether the legs were in frame for the whole baseline — gates the squat
+    hasLegs: samples.every(s => s.legs),
   };
 }
 
@@ -183,9 +259,13 @@ function buildCalibration(samples) {
 // ponytail: right-side arm landmarks only, as before.
 const EXERCISES = [
   { key: "squat", name: "Chair Squat", instruction: "Squat down, then stand back up.",
-    points: [24, 26, 28], readout: v => Math.round(180 - v) + "° flex",
+    points: [24, 26, 28], needs: [23, 24, 25, 26, 27, 28], requires: "your legs and feet in frame", readout: v => Math.round(180 - v) + "° flex",
     metric: (lm, wlm) => jointAngle(wlm, 24, 26, 28),
-    activeWhen: "below", restValue: 160, activeValue: 130, minROM: 105, targetROM: 90,
+    // restValue is 150, not 160: a rep only closes when the knee comes back above it, and real
+    // people finish a squat without locking out. Replayed over 25 real recordings, 160 left
+    // 7 of 17 clips with a rep that never closed — never counted, never graded. See
+    // docs/exercise-form-reference.md §6.
+    activeWhen: "below", restValue: 150, activeValue: 130, minROM: 105, targetROM: 90,
     form: [
       { id: "depth", label: "Go deeper — aim for thighs parallel", peak: p => p <= 90 },
       { id: "lean", label: "Chest up — too much forward lean",
@@ -199,7 +279,7 @@ const EXERCISES = [
         check: (lm, wlm) => Math.abs(jointAngle(wlm, 24, 26, 28) - jointAngle(wlm, 23, 25, 27)) < 15 },
     ] },
   { key: "abduction", name: "Abduction", instruction: "Raise your arm out to the side, then lower it.",
-    points: [24, 12, 16], readout: v => Math.round(v) + "°",
+    points: [24, 12, 16], needs: [11, 12, 14, 16, 23, 24], readout: v => Math.round(v) + "°",
     metric: (lm, wlm) => { const f = bodyFrame(wlm);
       return angle3(mul(f.up, -1), flatten(sub(wlm[16], wlm[12]), f.forward)); },
     activeWhen: "above", restValue: 30, activeValue: 80, minROM: 90, targetROM: 140,
@@ -215,7 +295,7 @@ const EXERCISES = [
         check: (lm, wlm, cal) => Math.abs(lean(trunkVec(wlm), cal.right)) < 12 },
     ] },
   { key: "flexion", name: "Flexion", instruction: "Raise your arm forward, then lower it.",
-    points: [24, 12, 16], readout: v => Math.round(v) + "°",
+    points: [24, 12, 16], needs: [11, 12, 14, 16, 23, 24], readout: v => Math.round(v) + "°",
     metric: (lm, wlm) => { const f = bodyFrame(wlm);
       return angle3(mul(f.up, -1), flatten(sub(wlm[16], wlm[12]), f.right)); },
     activeWhen: "above", restValue: 30, activeValue: 80, minROM: 90, targetROM: 140,
@@ -231,7 +311,7 @@ const EXERCISES = [
         check: (lm, wlm, cal) => Math.abs(lean(trunkVec(wlm), cal.forward)) < 12 },
     ] },
   { key: "lateralFlexion", name: "Lateral Flexion", instruction: "Face the camera. Bend sideways at the waist, then return.",
-    points: [12, 24], readout: v => Math.round(v) + "°",
+    points: [12, 24], needs: [11, 12, 23, 24], readout: v => Math.round(v) + "°",
     metric: (lm, wlm, cal) => Math.abs(lean(trunkVec(wlm), cal.right)),
     activeWhen: "above", restValue: 8, activeValue: 15, minROM: 20, targetROM: 30,
     form: [
@@ -241,12 +321,13 @@ const EXERCISES = [
       { id: "sagittal", label: "Stay upright — don't lean forward or back",
         check: (lm, wlm, cal) => Math.abs(lean(trunkVec(wlm), cal.forward)) < 15 },
       { id: "hips", label: "Keep your hips still — bend, don't shift",
-        check: (lm, wlm, cal) => { const span = Math.abs(lm[12].x - lm[11].x) || 1e-3;
+        check: (lm, wlm, cal) => { if (cal.hipOverAnkle == null) return true;   // no ankles, no reference
+          const span = Math.abs(lm[12].x - lm[11].x) || 1e-3;
           const now = ((lm[23].x + lm[24].x) / 2 - (lm[27].x + lm[28].x) / 2) / span;
           return Math.abs(now - cal.hipOverAnkle) < 0.35; } },
     ] },
   { key: "rotation", name: "Rotation", instruction: "Face the camera. Twist your shoulders, then return.",
-    points: [11, 12], readout: v => Math.round(v) + "°",
+    points: [11, 12], needs: [11, 12, 23, 24], readout: v => Math.round(v) + "°",
     metric: (lm, wlm, cal) => Math.abs(trunkTwist(wlm, cal)),
     activeWhen: "above", restValue: 8, activeValue: 20, minROM: 30, targetROM: 45,
     form: [
@@ -257,13 +338,14 @@ const EXERCISES = [
         check: (lm, wlm, cal) => Math.abs(lean(trunkVec(wlm), cal.right)) < 12 },
     ] },
   { key: "extension", name: "Extension", instruction: "Face the camera. Lean back, then return to standing.",
-    points: [12, 24], readout: v => Math.round(v) + "°",
+    points: [12, 24], needs: [11, 12, 23, 24], readout: v => Math.round(v) + "°",
     metric: (lm, wlm, cal) => Math.max(0, -lean(trunkVec(wlm), cal.forward)),
     activeWhen: "above", restValue: 5, activeValue: 12, minROM: 15, targetROM: 22,
     form: [
       { id: "range", label: "A little further back if it's comfortable", peak: p => p >= 22 },
       { id: "knees", label: "Keep your knees straight — arch from the back",
-        check: (lm, wlm) => jointAngle(wlm, 24, 26, 28) > 155 && jointAngle(wlm, 23, 25, 27) > 155 },
+        check: (lm, wlm, cal) => !cal.hasLegs                                   // legs not in frame
+          || (jointAngle(wlm, 24, 26, 28) > 155 && jointAngle(wlm, 23, 25, 27) > 155) },
       { id: "rotate", label: "Stay square — don't twist as you lean",
         check: (lm, wlm, cal) => Math.abs(trunkTwist(wlm, cal)) < 15 },
       { id: "sidebend", label: "Stay level — don't lean to one side",
@@ -273,6 +355,115 @@ const EXERCISES = [
 // a rule has to fail this many frames running before it counts against the rep — single-frame
 // landmark noise routinely trips any individual threshold
 const VIOLATION_FRAMES = 5;
+// --- exercise demonstrations ------------------------------------------------------------------
+// Animated inline SVG rather than photos or embedded clips: it ships inside this file, so it
+// works with no network, cannot rot into a broken link, and carries no licensing question.
+// Each figure is a stick body whose parts morph between a start and end pose via SMIL, which
+// interpolates `points` and `cx`/`cy` numerically — so a pose pair is just two coordinate lists
+// with matching point counts.
+//
+// `view` matters: abduction and lateral flexion happen in the frontal plane and read correctly
+// head-on, but arm flexion and trunk extension are sagittal and would be invisible from the
+// front, so those are drawn side-on. That mirrors how the movements are actually demonstrated.
+const FIGURES = {
+  squat: { view: "Facing the camera", cue: "Sit back and down, knees tracking over your toes.",
+    head: [[50, 16], [50, 40]],
+    parts: [
+      ["50,27 50,66", "50,51 50,90"],
+      ["34,60 38,44 50,29 62,44 66,60", "26,50 32,50 50,51 68,50 74,50"],
+      ["40,112 42,88 50,66 58,88 60,112", "40,112 26,94 50,90 74,94 60,112"],
+    ] },
+  abduction: { view: "Facing the camera", cue: "Arm straight, lift out to the side — don't shrug.",
+    head: [[50, 16], [50, 16]],
+    parts: [
+      ["50,27 50,66", "50,27 50,66"],
+      ["34,60 38,44 50,29 62,44 66,60", "22,10 34,18 50,29 62,44 66,60"],
+      ["40,112 42,88 50,66 58,88 60,112", "40,112 42,88 50,66 58,88 60,112"],
+    ] },
+  flexion: { view: "Shown from the side", cue: "Arm straight, lift forward and up.",
+    head: [[46, 16], [46, 16]],
+    parts: [
+      ["48,27 48,66", "48,27 48,66"],
+      ["58,60 55,44 48,29", "80,14 67,20 48,29"],
+      ["42,112 45,88 48,66", "42,112 45,88 48,66"],
+    ] },
+  lateralFlexion: { view: "Facing the camera", cue: "Bend sideways only — no twisting, hips still.",
+    head: [[50, 16], [34, 22]],
+    parts: [
+      ["50,27 50,66", "36,33 50,66"],
+      ["34,60 38,44 50,29 62,44 66,60", "20,56 24,42 36,31 52,48 58,62"],
+      ["40,112 42,88 50,66 58,88 60,112", "40,112 42,88 50,66 58,88 60,112"],
+    ] },
+  rotation: { view: "Facing the camera", cue: "Turn your shoulders, keep your hips pointing forward.",
+    head: [[50, 16], [50, 16]],
+    parts: [
+      ["50,27 50,66", "50,27 50,66"],
+      ["34,60 38,44 50,29 62,44 66,60", "44,58 45,42 50,30 59,41 63,55"],
+      ["40,112 42,88 50,66 58,88 60,112", "40,112 42,88 50,66 58,88 60,112"],
+    ] },
+  extension: { view: "Shown from the side", cue: "Arch gently backwards, knees straight.",
+    head: [[46, 16], [36, 21]],
+    parts: [
+      ["48,27 48,66", "38,31 48,66"],
+      ["58,60 55,44 48,29", "48,62 45,46 38,30"],
+      ["42,112 45,88 48,66", "42,112 45,88 48,66"],
+    ] },
+};
+const loop3 = (a, b) => `${a};${b};${a}`;
+function Demo({ exKey }) {
+  const fig = FIGURES[exKey];
+  if (!fig) return null;
+  const timing = { dur: "3.2s", repeatCount: "indefinite", calcMode: "spline",
+                   keyTimes: "0;0.5;1", keySplines: "0.4 0 0.2 1;0.4 0 0.2 1" };
+  return (
+    <svg className="demo" viewBox="0 0 100 122" aria-hidden="true">
+      <line className="floor" x1="16" y1="114" x2="84" y2="114" />
+      <circle className="fig" r="9" cx={fig.head[0][0]} cy={fig.head[0][1]} fill="none">
+        <animate attributeName="cx" values={loop3(fig.head[0][0], fig.head[1][0])} {...timing} />
+        <animate attributeName="cy" values={loop3(fig.head[0][1], fig.head[1][1])} {...timing} />
+      </circle>
+      {fig.parts.map(([from, to], i) => (
+        <polyline key={i} className="fig" points={from} fill="none">
+          <animate attributeName="points" values={loop3(from, to)} {...timing} />
+        </polyline>
+      ))}
+    </svg>
+  );
+}
+// Videos are linked as a YouTube *search*, not a fixed video id. A curated link would be one
+// takedown away from a dead end inside an offline-capable page; a search always resolves.
+const videoSearch = name =>
+  "https://www.youtube.com/results?search_query=" +
+  encodeURIComponent("how to do " + name + " exercise");
+
+function ExerciseGuide({ only, onClose }) {
+  const list = only ? EXERCISES.filter(e => e.key === only) : EXERCISES;
+  return (
+    <div id="guide" onClick={onClose}>
+      <div className="sheet" onClick={e => e.stopPropagation()}>
+        <div className="sheet-head">
+          <h2>{only ? list[0].name : "How to do these"}</h2>
+          <button className="close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className={"cards" + (only ? " single" : "")}>
+          {list.map(e => (
+            <div className="card" key={e.key}>
+              <Demo exKey={e.key} />
+              <h4>{e.name}</h4>
+              <p className="what">{e.instruction}</p>
+              <p className="cue">{FIGURES[e.key].cue}</p>
+              <p className="view">{FIGURES[e.key].view}</p>
+              <a href={videoSearch(e.name)} target="_blank" rel="noopener noreferrer">Watch a video ↗</a>
+            </div>
+          ))}
+        </div>
+        <p className="note">Arm exercises track your <b>right</b> arm. The camera view is mirrored,
+          so your right arm appears on the left of the screen — same as looking in a mirror.</p>
+      </div>
+    </div>
+  );
+}
+
 const blankScore = () => EXERCISES.map(() => ({ total: 0, clean: 0, partial: 0, best: null }));
 const blankState = () => EXERCISES.map(() => ({ phase: "rest", smooth: null, peak: null, streaks: {}, violations: [] }));
 const VERDICT_MS = 2200;
@@ -285,6 +476,10 @@ function App() {
   const [coach, setCoach] = useState(""); // live cue for the form rule currently being broken
   const [verdict, setVerdict] = useState(null); // { kind, text } for the last completed rep
   const [calibPct, setCalibPct] = useState(0);
+  // which exercises have all their landmarks in frame right now — a seated user gets the five
+  // torso exercises and not the squat, rather than a dead app
+  const [available, setAvailable] = useState(() => EXERCISES.map(() => true));
+  const [guide, setGuide] = useState(null); // null | "all" | exercise key
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const landmarkerRef = useRef(null);
@@ -294,6 +489,7 @@ function App() {
   const scoreRef = useRef(blankScore()); // mirrors score state for the rAF loop
   const activeRef = useRef(-1);
   const coachRef = useRef("");
+  const availRef = useRef(EXERCISES.map(() => true));
   const poseOkRef = useRef(true);
   const calRef = useRef(null); // captured neutral pose; null until calibration completes
   const calSamplesRef = useRef([]);
@@ -344,16 +540,15 @@ function App() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
 
-    // torso + legs all need to be visible for the baseline to mean anything
-    const trunkVisible = lm && wlm && [11, 12, 23, 24, 25, 26, 27, 28]
-      .every(idx => (lm[idx].visibility ?? 1) > 0.6 && (lm[idx].presence ?? 1) > 0.6);
-
     if (stageRef.current === "calibrating") {
-      if (trunkVisible) {
+      const blocker = calibrationBlocker(lm, wlm);
+      if (blocker !== coachRef.current) { coachRef.current = blocker; setCoach(blocker || ""); }
+      if (!blocker) {
         calSamplesRef.current.push(calibSample(lm, wlm));
         setCalibPct(Math.round(100 * calSamplesRef.current.length / CALIB_FRAMES));
         if (calSamplesRef.current.length >= CALIB_FRAMES) {
           calRef.current = buildCalibration(calSamplesRef.current);
+          coachRef.current = ""; setCoach("");
           stageRef.current = "running";
           setStage("running");
         }
@@ -371,6 +566,7 @@ function App() {
       let changed = false;
       let nowActive = -1;
       let cue = "";
+      const avail = EXERCISES.map(() => false);
       // every exercise is evaluated every frame — whichever one crosses active->rest gets its own
       // rep counted, so the user can do them in any order without picking one first.
       // ponytail: several exercises read overlapping landmarks, so more than one can flag "active"
@@ -378,8 +574,10 @@ function App() {
       // demo user — add view-direction disambiguation if cross-triggering shows up in practice.
       EXERCISES.forEach((ex, i) => {
         const st = stRef.current[i];
-        // visibility = not occluded, presence = actually in frame — a joint can pass one and fail the other
-        const ok = ex.points.every(idx => (lm[idx].visibility ?? 1) > 0.5 && (lm[idx].presence ?? 1) > 0.5);
+        // every landmark the metric and its rules actually read has to be visible and in frame,
+        // not just the two or three that get drawn
+        const ok = allSeen(lm, ex.needs);
+        avail[i] = ok;
         if (!ok) return;
         const raw = ex.metric(lm, wlm, cal);
         const s = st.smooth == null ? raw : st.smooth * 0.75 + raw * 0.25;
@@ -431,6 +629,7 @@ function App() {
       if (changed) setScore(scoreRef.current.map(s => ({ ...s })));
       if (nowActive !== activeRef.current) { activeRef.current = nowActive; setActiveIdx(nowActive); }
       if (cue !== coachRef.current) { coachRef.current = cue; setCoach(cue); }
+      if (avail.some((v, i) => v !== availRef.current[i])) { availRef.current = avail; setAvailable(avail); }
     }
     if (verdictAtRef.current && now - verdictAtRef.current > VERDICT_MS) {
       verdictAtRef.current = 0;
@@ -446,6 +645,8 @@ function App() {
     calRef.current = null;
     activeRef.current = -1;
     coachRef.current = "";
+    availRef.current = EXERCISES.map(() => true);
+    setAvailable(availRef.current);
     poseOkRef.current = true;
     verdictAtRef.current = 0;
     setScore(scoreRef.current);
@@ -500,6 +701,8 @@ function App() {
 
   const live = stage === "calibrating" || stage === "running";
   const ex = activeIdx >= 0 ? EXERCISES[activeIdx] : null;
+  const guideNode = guide && <ExerciseGuide only={guide === "all" ? null : guide}
+                                            onClose={() => setGuide(null)} />;
   // video stays mounted and displayed at all times — a display:none video won't reliably play,
   // and the opaque idle screen covers it anyway until we're live
   return (
@@ -514,6 +717,7 @@ function App() {
             <button className="primary" onClick={start} disabled={stage === "loading"}>
               {stage === "loading" ? "Loading model…" : "Start"}
             </button>
+            <button className="ghost" onClick={() => setGuide("all")}>See how each exercise works</button>
             {coach && <p className="error" style={{ marginTop: 4 }}>{coach}</p>}
           </div>
         )}
@@ -523,6 +727,8 @@ function App() {
             <p>Face the camera, full body in frame, arms relaxed at your sides. This captures your
                neutral posture so every rep is graded against <em>your</em> body, not an average one.</p>
             <div className="bar"><span style={{ width: calibPct + "%" }} /></div>
+            {/* never leave the bar sitting at 0% with no explanation — always name the fix */}
+            {coach && <div id="coach">{coach}</div>}
           </div>
         )}
         {stage === "running" && (
@@ -543,27 +749,37 @@ function App() {
       <div id="panel">
         <h3>Exercises</h3>
         {EXERCISES.map((e, i) => (
-          <div key={e.key} className={"row" + (i === activeIdx ? " active" : "")}>
-            <span className="name"><span className="dot" /><span>{e.name}</span></span>
+          <div key={e.key} role="button" tabIndex={0} title={"How to do " + e.name}
+               onClick={() => setGuide(e.key)}
+               onKeyDown={ev => (ev.key === "Enter" || ev.key === " ") && setGuide(e.key)}
+               className={"row" + (i === activeIdx ? " active" : "")
+                                    + (stage === "running" && !available[i] ? " off" : "")}>
+            <span className="name"><span className="dot" /><span>{e.name}</span><span className="help">?</span></span>
             <span className="score">
               <span className="clean">{score[i].clean}</span>
               <span className="sep">/</span>
               <span className="total">{score[i].total}</span>
-              <span className="peak">{score[i].best == null ? "—" : "best " + e.readout(score[i].best)}</span>
+              <span className="peak">
+                {stage === "running" && !available[i]
+                  ? (e.requires || "not fully in frame")
+                  : score[i].best == null ? "—" : "best " + e.readout(score[i].best)}
+              </span>
             </span>
           </div>
         ))}
         <p className="legend"><b>clean</b> / counted reps. Reps that miss the minimum range are
-          discarded as partials; reps with a form fault still count but aren't clean.</p>
+          discarded as partials; reps with a form fault still count but aren't clean. Dimmed rows
+          need more of you in frame — the five trunk and arm exercises work seated.</p>
         <button className="reset" onClick={reset}>Reset</button>
       </div>
+      {guideNode}
     </div>
   );
 }
 
 // Exposed for the offline tuning/replay harness described in docs/exercise-form-reference.md §6 —
 // lets a test drive the geometry and rule engine with recorded or synthetic landmarks, no camera.
-window.__exercise = { EXERCISES, bodyFrame, calibSample, buildCalibration, lean, trunkTwist, pelvisTwist, trunkVec, kneeDev, jointAngle, angle3 };
+window.__exercise = { EXERCISES, bodyFrame, calibSample, buildCalibration, lean, trunkTwist, pelvisTwist, trunkVec, kneeDev, jointAngle, angle3, calibrationBlocker };
 
 createRoot(document.getElementById("root")).render(<App />);
 </script>
