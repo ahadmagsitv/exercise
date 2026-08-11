@@ -20,16 +20,39 @@
   #overlay p { margin:0; font-size:13px; color:#d1d1db; text-align:center; max-width:85%; text-shadow:0 2px 6px #000; }
   #overlay p.error { color:#ff8a80; font-weight:600; }
   #overlay .count { font-size:56px; font-weight:700; margin-top:8px; letter-spacing:-1px; text-shadow:0 2px 6px #000; }
+  /* live coaching cue for the form rule currently being violated */
+  #coach { margin-top:10px; padding:8px 16px; border-radius:999px; font-size:13px; font-weight:600;
+           background:rgba(245,158,11,.18); color:#fcd34d; border:1px solid rgba(245,158,11,.35); backdrop-filter:blur(6px); }
+  /* verdict banner shown for a moment after each completed rep */
+  #verdict { position:absolute; top:24px; left:50%; transform:translateX(-50%); padding:8px 18px; border-radius:999px;
+             font-size:14px; font-weight:600; backdrop-filter:blur(8px); white-space:nowrap; max-width:90%; overflow:hidden; text-overflow:ellipsis; }
+  #verdict.clean { background:rgba(34,197,94,.18); color:#86efac; border:1px solid rgba(34,197,94,.4); }
+  #verdict.flagged { background:rgba(245,158,11,.18); color:#fcd34d; border:1px solid rgba(245,158,11,.4); }
+  #verdict.partial { background:rgba(148,163,184,.16); color:#cbd5e1; border:1px solid rgba(148,163,184,.35); }
+  #calib { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;
+           background:rgba(6,6,12,.72); backdrop-filter:blur(3px); text-align:center; padding:32px; }
+  #calib h2 { margin:0; font-size:20px; font-weight:600; }
+  #calib p { margin:0; font-size:13px; color:#a8a8b8; max-width:80%; }
+  #calib .bar { width:180px; height:6px; border-radius:3px; background:rgba(255,255,255,.12); overflow:hidden; }
+  #calib .bar span { display:block; height:100%; background:var(--accent); transition:width .1s linear; }
   button.primary { font-size:16px; font-weight:600; padding:12px 28px; border-radius:12px; border:none; background:var(--accent); color:#fff; cursor:pointer; box-shadow:0 8px 24px rgba(99,102,241,.4); }
   button.primary:hover { filter:brightness(1.1); }
-  #panel { width:280px; background:var(--card); border:1px solid var(--border); border-radius:20px; padding:20px; display:flex; flex-direction:column; gap:10px; box-shadow:0 20px 50px rgba(0,0,0,.4); align-self:stretch; margin:40px 0; }
+  button.primary:disabled { opacity:.55; cursor:default; box-shadow:none; }
+  #panel { width:300px; background:var(--card); border:1px solid var(--border); border-radius:20px; padding:20px; display:flex; flex-direction:column; gap:8px; box-shadow:0 20px 50px rgba(0,0,0,.4); align-self:stretch; margin:40px 0; }
   #panel h3 { margin:0 0 4px; font-size:13px; font-weight:600; color:#a0a0b0; text-transform:uppercase; letter-spacing:.06em; }
-  .row { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; border-radius:12px; background:rgba(255,255,255,.02); }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 12px; border-radius:12px; background:rgba(255,255,255,.02); }
   .row.active { background:rgba(99,102,241,.12); box-shadow:0 0 0 1px rgba(99,102,241,.3); }
-  .row .name { display:flex; align-items:center; gap:10px; font-size:14px; }
+  .row .name { display:flex; align-items:center; gap:10px; font-size:14px; min-width:0; }
+  .row .name span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .dot { width:8px; height:8px; border-radius:50%; background:#3a3a46; flex:none; }
   .row.active .dot { background:var(--accent); box-shadow:0 0 0 4px rgba(99,102,241,.25); }
-  .row .score { font-variant-numeric:tabular-nums; font-size:14px; color:#8b8b9a; font-weight:600; }
+  .row .score { font-variant-numeric:tabular-nums; font-size:14px; font-weight:600; flex:none; text-align:right; }
+  .row .score .clean { color:#86efac; }
+  .row .score .sep { color:#4a4a5a; margin:0 1px; }
+  .row .score .total { color:#8b8b9a; }
+  .row .peak { display:block; font-size:11px; font-weight:500; color:#6b6b7a; margin-top:1px; }
+  .legend { margin-top:4px; font-size:11px; line-height:1.5; color:#6b6b7a; }
+  .legend b { color:#86efac; font-weight:600; }
   button.reset { margin-top:8px; font-size:14px; font-weight:600; padding:10px; border-radius:12px; border:1px solid var(--border); background:transparent; color:#c5c5d2; cursor:pointer; }
   button.reset:hover { background:rgba(255,255,255,.05); border-color:#4a4a5a; }
 </style>
@@ -54,69 +77,249 @@ import React, { useState, useRef, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import { PoseLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 
+// Every threshold below traces to a row in docs/exercise-form-reference.md. Change one, change both.
+const DEG = 180 / Math.PI;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
 // minimal 3D vector helpers — world landmarks are real (x,y,z) meters, not screen pixels
 const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
+const add = (a, b) => ({ x: a.x + b.x, y: a.y + b.y, z: a.z + b.z });
+const mul = (v, s) => ({ x: v.x * s, y: v.y * s, z: v.z * s });
+const mid = (a, b) => mul(add(a, b), 0.5);
 const dot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
 const cross = (a, b) => ({ x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x });
 const norm = v => Math.hypot(v.x, v.y, v.z);
-const unit = v => { const n = norm(v) || 1; return { x: v.x / n, y: v.y / n, z: v.z / n }; };
+const unit = v => { const n = norm(v) || 1; return mul(v, 1 / n); };
 // component of v lying in the plane perpendicular to `axis` (i.e. v with the axis direction removed)
-const flatten = (v, axis) => sub(v, { x: axis.x * dot(v, axis), y: axis.y * dot(v, axis), z: axis.z * dot(v, axis) });
+const flatten = (v, axis) => sub(v, mul(axis, dot(v, axis)));
 // true 3D angle between two vectors, in degrees — coordinate-frame agnostic, unlike picking
 // two of the three axes off screen-space landmarks (which is what this used to do)
 function angle3(v1, v2) {
   const m = norm(v1) * norm(v2);
-  return m === 0 ? 0 : Math.acos(Math.max(-1, Math.min(1, dot(v1, v2) / m))) * 180 / Math.PI;
+  return m === 0 ? 0 : Math.acos(clamp(dot(v1, v2) / m, -1, 1)) * DEG;
 }
-// local torso axes from world landmarks: up (hip->shoulder), right (shoulder line, leveled off `up`),
-// forward (out of the chest). Body-relative, so it's correct regardless of which way the camera faces —
-// used to split "raise arm" into its sideways (abduction) vs forward (flexion) component.
-function armFrame(wlm) {
-  const up = unit(sub(wlm[12], wlm[24]));
+
+// Body-local axes from world landmarks, off the shoulder/hip midpoints (steadier than one side).
+// MediaPipe world axes are x-right, y-down, z-depth, so `up` = hip->shoulder and `forward` is
+// anterior (out of the chest). SIGN CAVEAT: `forward`'s direction is derived from that stated
+// convention, not measured — if Extension triggers on leaning *forward*, flip the cross order.
+// See docs/exercise-form-reference.md §5.
+function bodyFrame(wlm) {
+  const up = unit(sub(mid(wlm[11], wlm[12]), mid(wlm[23], wlm[24])));
   const right = unit(flatten(sub(wlm[12], wlm[11]), up));
-  const forward = unit(cross(right, up));
-  return { right, forward };
+  return { up, right, forward: unit(cross(up, right)) };
 }
-// tilt of the shoulder-hip line off vertical, in the plane given by k1/k2 (screen-space landmarks)
-function tilt(shoulder, hip, k1, k2) {
-  return Math.abs(Math.atan2(shoulder[k1] - hip[k1], hip[k2] - shoulder[k2]) * 180 / Math.PI);
+// signed lean of `v` away from neutral, measured along a calibrated body axis. Because the axis
+// comes from the user's own captured rest pose, this is camera-tilt and body-proportion independent —
+// which is what let lateral flexion / rotation / extension move off MediaPipe's rough screen-space z.
+const lean = (v, axis) => Math.asin(clamp(dot(unit(v), axis), -1, 1)) * DEG;
+// Dynamic knee valgus: how far the knee sits off the hip->ankle line, measured along the body's
+// lateral axis and normalised by leg length. Signed, positive = displaced toward the person's right.
+//
+// The textbook measure is the frontal plane projection angle, but computing it by projecting the
+// thigh/shank into the frontal plane degenerates precisely at squat depth: at parallel the thigh is
+// horizontal and purely sagittal, so the projection is a zero-length vector and the angle is
+// undefined. This point-to-line form measures the same medial/lateral displacement without
+// projecting away the segment. KNEE_DEV_LIMIT is the equivalent of the literature's 10-degree FPPA
+// screening threshold: a knee offset d on a leg of length L subtends ~2*asin(2d/L), so 10 deg
+// corresponds to d/L ~= 0.044.
+const KNEE_DEV_LIMIT = 0.044;
+function kneeDev(wlm, right, h, k, a) {
+  const axis = sub(wlm[a], wlm[h]);
+  const len2 = dot(axis, axis) || 1e-9;
+  const t = clamp(dot(sub(wlm[k], wlm[h]), axis) / len2, 0, 1);
+  const onLine = add(wlm[h], mul(axis, t));
+  return dot(sub(wlm[k], onLine), right) / (Math.sqrt(len2) || 1e-9);
 }
-// ponytail: right-side landmarks only. Squat/abduction/flexion read world (real 3D meter)
-// landmarks, so they're camera-angle independent. Lateral flexion/rotation/extension still lean
-// on MediaPipe's screen-space z, which is a rough monocular estimate, not true depth — that needs
-// a calibrated "which way is vertical" reference (gravity or a captured rest pose) to do properly
-// in 3D, which this doesn't have; left as-is rather than guessing an unverified fix.
+const jointAngle = (wlm, a, b, c) => angle3(sub(wlm[a], wlm[b]), sub(wlm[c], wlm[b]));
+// shoulder-line twist about the calibrated vertical, in degrees
+function trunkTwist(wlm, cal) {
+  const r = bodyFrame(wlm).right;
+  return Math.atan2(dot(cross(cal.right, r), cal.up), dot(cal.right, r)) * DEG;
+}
+function pelvisTwist(wlm, cal) {
+  const r = unit(flatten(sub(wlm[24], wlm[23]), cal.up));
+  return Math.atan2(dot(cross(cal.hipRight, r), cal.up), dot(cal.hipRight, r)) * DEG;
+}
+const trunkVec = wlm => sub(mid(wlm[11], wlm[12]), mid(wlm[23], wlm[24]));
+
+// --- calibration ------------------------------------------------------------------------------
+// A rep cannot be graded against "neutral" without knowing what this user's neutral looks like.
+// One second of relaxed standing gives us their body axes plus the personal baselines that the
+// valgus / shrug / hip-shift rules are expressed as deviations from.
+const CALIB_FRAMES = 30;
+function calibSample(lm, wlm) {
+  const f = bodyFrame(wlm);
+  const span = Math.abs(lm[12].x - lm[11].x) || 1e-3;
+  return {
+    up: f.up, right: f.right,
+    hipRight: unit(flatten(sub(wlm[24], wlm[23]), f.up)),
+    torso: norm(sub(wlm[12], wlm[24])),
+    kneeR: kneeDev(wlm, f.right, 24, 26, 28),
+    kneeL: kneeDev(wlm, f.right, 23, 25, 27),
+    hipOverAnkle: ((lm[23].x + lm[24].x) / 2 - (lm[27].x + lm[28].x) / 2) / span,
+    span,
+  };
+}
+function buildCalibration(samples) {
+  const n = samples.length;
+  const avgV = k => unit(samples.reduce((acc, s) => add(acc, s[k]), { x: 0, y: 0, z: 0 }));
+  const avgN = k => samples.reduce((acc, s) => acc + s[k], 0) / n;
+  const up = avgV("up");
+  const right = unit(flatten(avgV("right"), up)); // re-orthonormalise after averaging
+  return {
+    up, right, forward: unit(cross(up, right)),
+    hipRight: unit(flatten(avgV("hipRight"), up)),
+    torso: avgN("torso"), kneeR: avgN("kneeR"), kneeL: avgN("kneeL"),
+    hipOverAnkle: avgN("hipOverAnkle"), span: avgN("span"),
+  };
+}
+
+// --- exercises --------------------------------------------------------------------------------
+// `metric` drives rep detection; `form` grades it. A rule with `check` runs every frame during the
+// active phase (and must fail VIOLATION_FRAMES in a row to stick, so landmark jitter can't flag a
+// rep); a rule with `peak` runs once at rep end against the rep's extreme value.
+// minROM gates whether the rep counts at all — below it, the rep is a partial and is discarded.
+// ponytail: right-side arm landmarks only, as before.
 const EXERCISES = [
-  { key: "squat", name: "Chair Squat", instruction: "Squat down, then stand back up.", needsWorld: true,
-    points: [24, 26, 28], metric: (lm, wlm) => angle3(sub(wlm[24], wlm[26]), sub(wlm[28], wlm[26])),
-    activeWhen: "below", restValue: 160, activeValue: 110 },
-  { key: "abduction", name: "Abduction", instruction: "Raise your arm out to the side, then lower it.", needsWorld: true,
-    points: [24, 12, 16], metric: (lm, wlm) => angle3(sub(wlm[24], wlm[12]), flatten(sub(wlm[16], wlm[12]), armFrame(wlm).forward)),
-    activeWhen: "above", restValue: 30, activeValue: 80 },
-  { key: "flexion", name: "Flexion", instruction: "Raise your arm forward, then lower it.", needsWorld: true,
-    points: [24, 12, 16], metric: (lm, wlm) => angle3(sub(wlm[24], wlm[12]), flatten(sub(wlm[16], wlm[12]), armFrame(wlm).right)),
-    activeWhen: "above", restValue: 30, activeValue: 80 },
+  { key: "squat", name: "Chair Squat", instruction: "Squat down, then stand back up.",
+    points: [24, 26, 28], readout: v => Math.round(180 - v) + "° flex",
+    metric: (lm, wlm) => jointAngle(wlm, 24, 26, 28),
+    activeWhen: "below", restValue: 160, activeValue: 130, minROM: 105, targetROM: 90,
+    form: [
+      { id: "depth", label: "Go deeper — aim for thighs parallel", peak: p => p <= 90 },
+      { id: "lean", label: "Chest up — too much forward lean",
+        check: (lm, wlm, cal) => Math.abs(lean(trunkVec(wlm), cal.forward)) < 45 },
+      // valgus = each knee drifting toward the midline, i.e. the right knee moving left of its
+      // own baseline and the left knee moving right of its own baseline
+      { id: "valgus", label: "Knees out — don't let them cave in",
+        check: (lm, wlm, cal) => kneeDev(wlm, cal.right, 24, 26, 28) - cal.kneeR > -KNEE_DEV_LIMIT
+                              && kneeDev(wlm, cal.right, 23, 25, 27) - cal.kneeL < KNEE_DEV_LIMIT },
+      { id: "symmetry", label: "Even weight — you're favouring one leg",
+        check: (lm, wlm) => Math.abs(jointAngle(wlm, 24, 26, 28) - jointAngle(wlm, 23, 25, 27)) < 15 },
+    ] },
+  { key: "abduction", name: "Abduction", instruction: "Raise your arm out to the side, then lower it.",
+    points: [24, 12, 16], readout: v => Math.round(v) + "°",
+    metric: (lm, wlm) => { const f = bodyFrame(wlm);
+      return angle3(mul(f.up, -1), flatten(sub(wlm[16], wlm[12]), f.forward)); },
+    activeWhen: "above", restValue: 30, activeValue: 80, minROM: 90, targetROM: 140,
+    form: [
+      { id: "range", label: "Reach higher — take it toward overhead", peak: p => p >= 140 },
+      { id: "elbow", label: "Keep your arm straight",
+        check: (lm, wlm) => jointAngle(wlm, 12, 14, 16) > 150 },
+      { id: "shrug", label: "Don't shrug — keep the shoulder down",
+        check: (lm, wlm, cal) => norm(sub(wlm[12], wlm[24])) < cal.torso * 1.08 },
+      { id: "plane", label: "Out to the side — your arm drifted forward",
+        check: (lm, wlm) => Math.abs(dot(unit(sub(wlm[16], wlm[12])), bodyFrame(wlm).forward)) < 0.34 },
+      { id: "lean", label: "Don't lean away — keep your trunk still",
+        check: (lm, wlm, cal) => Math.abs(lean(trunkVec(wlm), cal.right)) < 12 },
+    ] },
+  { key: "flexion", name: "Flexion", instruction: "Raise your arm forward, then lower it.",
+    points: [24, 12, 16], readout: v => Math.round(v) + "°",
+    metric: (lm, wlm) => { const f = bodyFrame(wlm);
+      return angle3(mul(f.up, -1), flatten(sub(wlm[16], wlm[12]), f.right)); },
+    activeWhen: "above", restValue: 30, activeValue: 80, minROM: 90, targetROM: 140,
+    form: [
+      { id: "range", label: "Reach higher — take it toward overhead", peak: p => p >= 140 },
+      { id: "elbow", label: "Keep your arm straight",
+        check: (lm, wlm) => jointAngle(wlm, 12, 14, 16) > 150 },
+      { id: "shrug", label: "Don't shrug — keep the shoulder down",
+        check: (lm, wlm, cal) => norm(sub(wlm[12], wlm[24])) < cal.torso * 1.08 },
+      { id: "plane", label: "Straight forward — your arm drifted out to the side",
+        check: (lm, wlm) => Math.abs(dot(unit(sub(wlm[16], wlm[12])), bodyFrame(wlm).right)) < 0.34 },
+      { id: "lean", label: "Don't lean back — keep your trunk still",
+        check: (lm, wlm, cal) => Math.abs(lean(trunkVec(wlm), cal.forward)) < 12 },
+    ] },
   { key: "lateralFlexion", name: "Lateral Flexion", instruction: "Face the camera. Bend sideways at the waist, then return.",
-    points: [12, 24], metric: lm => tilt(lm[12], lm[24], "x", "y"), activeWhen: "above", restValue: 8, activeValue: 20 },
+    points: [12, 24], readout: v => Math.round(v) + "°",
+    metric: (lm, wlm, cal) => Math.abs(lean(trunkVec(wlm), cal.right)),
+    activeWhen: "above", restValue: 8, activeValue: 15, minROM: 20, targetROM: 30,
+    form: [
+      { id: "range", label: "Reach further down your leg", peak: p => p >= 30 },
+      { id: "rotate", label: "Don't twist — bend straight to the side",
+        check: (lm, wlm, cal) => Math.abs(trunkTwist(wlm, cal)) < 15 },
+      { id: "sagittal", label: "Stay upright — don't lean forward or back",
+        check: (lm, wlm, cal) => Math.abs(lean(trunkVec(wlm), cal.forward)) < 15 },
+      { id: "hips", label: "Keep your hips still — bend, don't shift",
+        check: (lm, wlm, cal) => { const span = Math.abs(lm[12].x - lm[11].x) || 1e-3;
+          const now = ((lm[23].x + lm[24].x) / 2 - (lm[27].x + lm[28].x) / 2) / span;
+          return Math.abs(now - cal.hipOverAnkle) < 0.35; } },
+    ] },
   { key: "rotation", name: "Rotation", instruction: "Face the camera. Twist your shoulders, then return.",
-    points: [11, 12], metric: lm => Math.abs(lm[11].z - lm[12].z) * 100, activeWhen: "above", restValue: 5, activeValue: 15 },
+    points: [11, 12], readout: v => Math.round(v) + "°",
+    metric: (lm, wlm, cal) => Math.abs(trunkTwist(wlm, cal)),
+    activeWhen: "above", restValue: 8, activeValue: 20, minROM: 30, targetROM: 45,
+    form: [
+      { id: "range", label: "Rotate further — aim for a quarter turn", peak: p => p >= 45 },
+      { id: "pelvis", label: "Hips forward — turn the trunk, not the whole body",
+        check: (lm, wlm, cal) => Math.abs(pelvisTwist(wlm, cal)) < Math.abs(trunkTwist(wlm, cal)) * 0.5 + 8 },
+      { id: "sidebend", label: "Stay level — don't lean into the turn",
+        check: (lm, wlm, cal) => Math.abs(lean(trunkVec(wlm), cal.right)) < 12 },
+    ] },
   { key: "extension", name: "Extension", instruction: "Face the camera. Lean back, then return to standing.",
-    points: [12, 24], metric: lm => tilt(lm[12], lm[24], "z", "y"), activeWhen: "above", restValue: 5, activeValue: 15 },
+    points: [12, 24], readout: v => Math.round(v) + "°",
+    metric: (lm, wlm, cal) => Math.max(0, -lean(trunkVec(wlm), cal.forward)),
+    activeWhen: "above", restValue: 5, activeValue: 12, minROM: 15, targetROM: 22,
+    form: [
+      { id: "range", label: "A little further back if it's comfortable", peak: p => p >= 22 },
+      { id: "knees", label: "Keep your knees straight — arch from the back",
+        check: (lm, wlm) => jointAngle(wlm, 24, 26, 28) > 155 && jointAngle(wlm, 23, 25, 27) > 155 },
+      { id: "rotate", label: "Stay square — don't twist as you lean",
+        check: (lm, wlm, cal) => Math.abs(trunkTwist(wlm, cal)) < 15 },
+      { id: "sidebend", label: "Stay level — don't lean to one side",
+        check: (lm, wlm, cal) => Math.abs(lean(trunkVec(wlm), cal.right)) < 12 },
+    ] },
 ];
+// a rule has to fail this many frames running before it counts against the rep — single-frame
+// landmark noise routinely trips any individual threshold
+const VIOLATION_FRAMES = 5;
+const blankScore = () => EXERCISES.map(() => ({ total: 0, clean: 0, partial: 0, best: null }));
+const blankState = () => EXERCISES.map(() => ({ phase: "rest", smooth: null, peak: null, streaks: {}, violations: [] }));
+const VERDICT_MS = 2200;
+
 function App() {
-  const [stage, setStage] = useState("idle"); // idle | running
-  const [reps, setReps] = useState(() => EXERCISES.map(() => 0));
+  const [stage, setStage] = useState("idle"); // idle | loading | calibrating | running
+  const [score, setScore] = useState(blankScore);
   const [activeIdx, setActiveIdx] = useState(-1); // which exercise is mid-rep right now, -1 = none
   const [poseOk, setPoseOk] = useState(true); // is a person visible at all
+  const [coach, setCoach] = useState(""); // live cue for the form rule currently being broken
+  const [verdict, setVerdict] = useState(null); // { kind, text } for the last completed rep
+  const [calibPct, setCalibPct] = useState(0);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const landmarkerRef = useRef(null);
-  const phaseRef = useRef(EXERCISES.map(() => "rest")); // per-exercise rest/active state, tracked independently
-  const smoothRef = useRef(EXERCISES.map(() => null)); // ponytail: EMA over raw per-frame metric, landmark jitter alone was crossing thresholds
-  const repsRef = useRef(EXERCISES.map(() => 0)); // mirrors reps state for the rAF loop
-  const activeRef = useRef(-1); // mirrors activeIdx for the rAF loop
+  // ponytail: per-exercise rest/active phase, EMA of the raw metric (landmark jitter alone was
+  // crossing thresholds), rep-extreme value, and per-rule consecutive-failure streaks
+  const stRef = useRef(blankState());
+  const scoreRef = useRef(blankScore()); // mirrors score state for the rAF loop
+  const activeRef = useRef(-1);
+  const coachRef = useRef("");
   const poseOkRef = useRef(true);
+  const calRef = useRef(null); // captured neutral pose; null until calibration completes
+  const calSamplesRef = useRef([]);
+  const stageRef = useRef("idle");
+  const verdictAtRef = useRef(0);
   const runningRef = useRef(false); // lets reset() stop the rAF loop without waiting for a re-render
+
+  // A rep just ended. Grade the rep-extreme value against minROM/targetROM, fold in whatever
+  // form rules stuck during the active phase, and turn that into one of three outcomes.
+  const gradeRep = (ex, i) => {
+    const st = stRef.current[i];
+    const peak = st.peak;
+    const reached = v => ex.activeWhen === "below" ? peak <= v : peak >= v;
+    const s = scoreRef.current[i];
+    if (peak == null || !reached(ex.minROM)) {
+      s.partial += 1;
+      return { kind: "partial", text: "Partial rep — didn't reach range, not counted" };
+    }
+    // peak-based rules can only be judged now that the rep is over
+    const missed = ex.form.filter(r => r.peak && !r.peak(peak)).map(r => r.label);
+    const broken = st.violations.concat(missed);
+    s.total += 1;
+    s.best = s.best == null ? peak : (ex.activeWhen === "below" ? Math.min(s.best, peak) : Math.max(s.best, peak));
+    if (!broken.length) { s.clean += 1; return { kind: "clean", text: "Good rep — " + ex.readout(peak) }; }
+    return { kind: "flagged", text: broken[0] };
+  };
 
   const loop = useCallback(() => {
     const video = videoRef.current;
@@ -141,38 +344,78 @@ function App() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
 
-    if (lm) {
+    // torso + legs all need to be visible for the baseline to mean anything
+    const trunkVisible = lm && wlm && [11, 12, 23, 24, 25, 26, 27, 28]
+      .every(idx => (lm[idx].visibility ?? 1) > 0.6 && (lm[idx].presence ?? 1) > 0.6);
+
+    if (stageRef.current === "calibrating") {
+      if (trunkVisible) {
+        calSamplesRef.current.push(calibSample(lm, wlm));
+        setCalibPct(Math.round(100 * calSamplesRef.current.length / CALIB_FRAMES));
+        if (calSamplesRef.current.length >= CALIB_FRAMES) {
+          calRef.current = buildCalibration(calSamplesRef.current);
+          stageRef.current = "running";
+          setStage("running");
+        }
+      } else if (calSamplesRef.current.length) {
+        // they moved out of frame mid-capture — a half-captured baseline is worse than none
+        calSamplesRef.current = [];
+        setCalibPct(0);
+      }
+      requestAnimationFrame(loop);
+      return;
+    }
+
+    const cal = calRef.current;
+    if (lm && wlm && cal) {
       let changed = false;
       let nowActive = -1;
+      let cue = "";
       // every exercise is evaluated every frame — whichever one crosses active->rest gets its own
       // rep counted, so the user can do them in any order without picking one first.
       // ponytail: several exercises read overlapping landmarks, so more than one can flag "active"
       // in the same frame; the overlay/skeleton just shows the last match found. Fine for a single
       // demo user — add view-direction disambiguation if cross-triggering shows up in practice.
       EXERCISES.forEach((ex, i) => {
+        const st = stRef.current[i];
         // visibility = not occluded, presence = actually in frame — a joint can pass one and fail the other
         const ok = ex.points.every(idx => (lm[idx].visibility ?? 1) > 0.5 && (lm[idx].presence ?? 1) > 0.5);
         if (!ok) return;
-        if (ex.needsWorld && !wlm) return; // world landmarks missing this frame — skip rather than crash
-        const raw = ex.metric(lm, wlm);
-        const s = smoothRef.current[i] == null ? raw : smoothRef.current[i] * 0.75 + raw * 0.25;
-        smoothRef.current[i] = s;
+        const raw = ex.metric(lm, wlm, cal);
+        const s = st.smooth == null ? raw : st.smooth * 0.75 + raw * 0.25;
+        st.smooth = s;
 
         const isActive = ex.activeWhen === "below" ? s < ex.activeValue : s > ex.activeValue;
         const isRest = ex.activeWhen === "below" ? s > ex.restValue : s < ex.restValue;
-        if (phaseRef.current[i] === "rest" && isActive) {
-          phaseRef.current[i] = "active";
-        } else if (phaseRef.current[i] === "active" && isRest) {
-          phaseRef.current[i] = "rest";
-          repsRef.current[i] += 1;
+        if (st.phase === "rest" && isActive) {
+          st.phase = "active";
+          st.peak = s; st.streaks = {}; st.violations = [];
+        } else if (st.phase === "active" && isRest) {
+          st.phase = "rest";
+          const v = gradeRep(ex, i);
+          verdictAtRef.current = now;
+          setVerdict(v);
           changed = true;
         }
-        if (phaseRef.current[i] === "active") {
+        if (st.phase === "active") {
           nowActive = i;
+          st.peak = ex.activeWhen === "below" ? Math.min(st.peak, s) : Math.max(st.peak, s);
+          // a rule must fail VIOLATION_FRAMES in a row before it sticks to this rep; a single
+          // bad frame is landmark noise, not bad form. Once stuck it stays stuck for the rep.
+          ex.form.forEach(rule => {
+            if (!rule.check) return;
+            let held = true;
+            try { held = rule.check(lm, wlm, cal); } catch (e) { return; }
+            if (held) { st.streaks[rule.id] = 0; return; }
+            st.streaks[rule.id] = (st.streaks[rule.id] || 0) + 1;
+            if (st.streaks[rule.id] === VIOLATION_FRAMES) st.violations.push(rule.label);
+          });
+          if (st.violations.length) cue = st.violations[st.violations.length - 1];
           if (ctx) {
             // flip x to match the mirrored (scaleX(-1)) video so dots land on the real limb
             const pts = ex.points.map(idx => [(1 - lm[idx].x) * canvas.width, lm[idx].y * canvas.height]);
-            ctx.strokeStyle = "#4f7cff"; ctx.lineWidth = 4; ctx.fillStyle = "#fff";
+            const bad = st.violations.length > 0;
+            ctx.strokeStyle = bad ? "#f59e0b" : "#4f7cff"; ctx.lineWidth = 4; ctx.fillStyle = "#fff";
             ctx.beginPath();
             pts.forEach(([x, y], k) => k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y));
             ctx.stroke();
@@ -180,37 +423,64 @@ function App() {
           }
         }
       });
-      if (changed) setReps([...repsRef.current]);
+      if (changed) setScore(scoreRef.current.map(s => ({ ...s })));
       if (nowActive !== activeRef.current) { activeRef.current = nowActive; setActiveIdx(nowActive); }
+      if (cue !== coachRef.current) { coachRef.current = cue; setCoach(cue); }
+    }
+    if (verdictAtRef.current && now - verdictAtRef.current > VERDICT_MS) {
+      verdictAtRef.current = 0;
+      setVerdict(null);
     }
     requestAnimationFrame(loop);
   }, []);
 
-  const start = async () => {
-    const fileset = await FilesetResolver.forVisionTasks(
-      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-    );
-    landmarkerRef.current = await PoseLandmarker.createFromOptions(fileset, {
-      baseOptions: {
-        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
-        delegate: "GPU",
-      },
-      runningMode: "VIDEO",
-      numPoses: 1,
-    });
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-    videoRef.current.srcObject = stream;
-    await videoRef.current.play();
-    phaseRef.current = EXERCISES.map(() => "rest");
-    smoothRef.current = EXERCISES.map(() => null);
-    repsRef.current = EXERCISES.map(() => 0);
+  const clearAll = () => {
+    stRef.current = blankState();
+    scoreRef.current = blankScore();
+    calSamplesRef.current = [];
+    calRef.current = null;
     activeRef.current = -1;
+    coachRef.current = "";
     poseOkRef.current = true;
-    setReps(repsRef.current);
+    verdictAtRef.current = 0;
+    setScore(scoreRef.current);
     setActiveIdx(-1);
     setPoseOk(true);
+    setCoach("");
+    setVerdict(null);
+    setCalibPct(0);
+  };
+
+  const start = async () => {
+    setStage("loading");
+    stageRef.current = "loading";
+    try {
+      const fileset = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+      );
+      landmarkerRef.current = await PoseLandmarker.createFromOptions(fileset, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+          delegate: "GPU",
+        },
+        runningMode: "VIDEO",
+        numPoses: 1,
+      });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+    } catch (e) {
+      setStage("idle");
+      stageRef.current = "idle";
+      setCoach("Couldn't start the camera: " + (e && e.message ? e.message : e));
+      return;
+    }
+    clearAll();
     runningRef.current = true;
-    setStage("running");
+    // grading is all relative to the user's own neutral pose, so nothing can be counted until
+    // that baseline exists — calibrate first, then start counting
+    stageRef.current = "calibrating";
+    setStage("calibrating");
     requestAnimationFrame(loop);
   };
 
@@ -218,54 +488,77 @@ function App() {
     runningRef.current = false;
     const stream = videoRef.current && videoRef.current.srcObject;
     if (stream) stream.getTracks().forEach(t => t.stop());
-    phaseRef.current = EXERCISES.map(() => "rest");
-    smoothRef.current = EXERCISES.map(() => null);
-    repsRef.current = EXERCISES.map(() => 0);
-    activeRef.current = -1;
-    poseOkRef.current = true;
-    setReps(repsRef.current);
-    setActiveIdx(-1);
-    setPoseOk(true);
+    clearAll();
+    stageRef.current = "idle";
     setStage("idle");
   };
 
+  const live = stage === "calibrating" || stage === "running";
   const ex = activeIdx >= 0 ? EXERCISES[activeIdx] : null;
+  // video stays mounted and displayed at all times — a display:none video won't reliably play,
+  // and the opaque idle screen covers it anyway until we're live
   return (
     <div id="app">
       <div id="wrap" className={stage === "running" && !poseOk ? "error" : ""}>
-        <video ref={videoRef} muted playsInline style={{ display: stage === "running" ? "block" : "none" }} />
-        <canvas ref={canvasRef} style={{ display: stage === "running" ? "block" : "none" }} />
-        {stage !== "running" && (
+        <video ref={videoRef} muted playsInline />
+        <canvas ref={canvasRef} />
+        {!live && (
           <div id="idle-screen">
             <h1>Exercise Counter</h1>
-            <p>Pose-tracked reps, right from your camera. Do any exercise, any order.</p>
-            <button className="primary" onClick={start}>Start</button>
+            <p>Pose-tracked reps with form grading, right from your camera. Do any exercise, any order.</p>
+            <button className="primary" onClick={start} disabled={stage === "loading"}>
+              {stage === "loading" ? "Loading model…" : "Start"}
+            </button>
+            {coach && <p className="error" style={{ marginTop: 4 }}>{coach}</p>}
+          </div>
+        )}
+        {stage === "calibrating" && (
+          <div id="calib">
+            <h2>Stand naturally</h2>
+            <p>Face the camera, full body in frame, arms relaxed at your sides. This captures your
+               neutral posture so every rep is graded against <em>your</em> body, not an average one.</p>
+            <div className="bar"><span style={{ width: calibPct + "%" }} /></div>
           </div>
         )}
         {stage === "running" && (
-          <div id="overlay">
-            {poseOk ? (
-              <>
-                <h2>{ex ? ex.name : "Ready"}</h2>
-                <p>{ex ? "Rep in progress…" : "Perform any exercise from the list on the right."}</p>
-              </>
-            ) : <p className="error">Can't see you — step into frame.</p>}
-          </div>
+          <>
+            {verdict && <div id="verdict" className={verdict.kind}>{verdict.text}</div>}
+            <div id="overlay">
+              {poseOk ? (
+                <>
+                  <h2>{ex ? ex.name : "Ready"}</h2>
+                  <p>{ex ? ex.instruction : "Perform any exercise from the list on the right."}</p>
+                  {coach && <div id="coach">{coach}</div>}
+                </>
+              ) : <p className="error">Can't see you — step into frame.</p>}
+            </div>
+          </>
         )}
       </div>
       <div id="panel">
         <h3>Exercises</h3>
         {EXERCISES.map((e, i) => (
           <div key={e.key} className={"row" + (i === activeIdx ? " active" : "")}>
-            <span className="name"><span className="dot" />{e.name}</span>
-            <span className="score">{reps[i]}</span>
+            <span className="name"><span className="dot" /><span>{e.name}</span></span>
+            <span className="score">
+              <span className="clean">{score[i].clean}</span>
+              <span className="sep">/</span>
+              <span className="total">{score[i].total}</span>
+              <span className="peak">{score[i].best == null ? "—" : "best " + e.readout(score[i].best)}</span>
+            </span>
           </div>
         ))}
+        <p className="legend"><b>clean</b> / counted reps. Reps that miss the minimum range are
+          discarded as partials; reps with a form fault still count but aren't clean.</p>
         <button className="reset" onClick={reset}>Reset</button>
       </div>
     </div>
   );
 }
+
+// Exposed for the offline tuning/replay harness described in docs/exercise-form-reference.md §6 —
+// lets a test drive the geometry and rule engine with recorded or synthetic landmarks, no camera.
+window.__exercise = { EXERCISES, bodyFrame, calibSample, buildCalibration, lean, trunkTwist, pelvisTwist, trunkVec, kneeDev, jointAngle, angle3 };
 
 createRoot(document.getElementById("root")).render(<App />);
 </script>
