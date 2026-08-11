@@ -408,7 +408,12 @@ function App() {
             try { held = rule.check(lm, wlm, cal); } catch (e) { return; }
             if (held) { st.streaks[rule.id] = 0; return; }
             st.streaks[rule.id] = (st.streaks[rule.id] || 0) + 1;
-            if (st.streaks[rule.id] === VIOLATION_FRAMES) st.violations.push(rule.label);
+            // guard the re-trigger: a rule that fails, recovers, then fails again would
+            // otherwise be recorded twice for one rep (seen on real recordings — IMG_2522
+            // reported "symmetry" two times in a single rep)
+            if (st.streaks[rule.id] === VIOLATION_FRAMES && !st.violations.includes(rule.label)) {
+              st.violations.push(rule.label);
+            }
           });
           if (st.violations.length) cue = st.violations[st.violations.length - 1];
           if (ctx) {

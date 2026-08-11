@@ -270,6 +270,58 @@ This catches sign errors, unit errors, and cross-triggering. It **cannot** tell 
 threshold is set at the right value for real humans — synthetic poses are exactly as clean or as
 faulty as you make them.
 
+### What real recorded data says (`tests/replay-check.js`)
+
+The rules have now been replayed over **25 real MediaPipe recordings** (33 world + 33 image
+landmarks per frame, 12 FPS, front-facing squats) borrowed from the SquatWell iOS project. The
+clips are not copied into this repo; the harness is pointed at them. See the file header for how
+to run it.
+
+Only the **squat** rules get real-data coverage — every clip is a squat. The other five
+exercises remain synthetic-only.
+
+**The geometry is confirmed against an independent implementation.** SquatWell computes knee
+flexion as `180 − interiorAngle` over the same world landmarks this app reads with
+`jointAngle(wlm, 24, 26, 28)`. Across **663 frames** the two sums differ by at most
+**2.3 × 10⁻¹³ degrees** — floating-point noise. Two separately written codebases read the same
+geometry identically.
+
+Three findings that synthetic poses could never have produced:
+
+1. **`restValue: 160` is too strict for real movement — 7 of 17 clips (41%) never close a rep.**
+   The rep only completes when the knee returns above 160° interior (under 20° of flexion). On
+   real recordings people finish a squat without fully locking out, so the rep stays open
+   forever and is never counted or graded. SquatWell's equivalent threshold is 150°, and it
+   detects a rep in every one of the same clips. This is the single highest-impact threshold in
+   the file and it is currently costing 41% of reps.
+
+2. **A rule could be recorded twice in one rep.** If a rule failed, recovered, then failed again,
+   the streak hit `VIOLATION_FRAMES` a second time and pushed a duplicate label — `IMG_2522`
+   reported "symmetry" twice. Fixed with a re-trigger guard in `index.html`.
+
+3. **8 of 25 clips have no standing frames at all**, so calibration correctly refuses them. Worth
+   noting that SquatWell silently substituted a mid-squat frame in exactly these cases; refusing
+   is the better behaviour, but the app needs a graceful message for "your clip starts too late".
+
+Rule firing rates on the 10 clips that did produce a rep: `depth` 50%, `valgus` 50%, `lean` 30%,
+`symmetry` 30%. No rule is dead, none fires on everything. Whether 50% valgus is real or a
+too-tight threshold cannot be answered without labels.
+
+### Frame rate is a hidden dependency
+
+The recordings are 12 FPS; a webcam is typically 30–60. Both debounce constants are expressed in
+**frames**, not seconds:
+
+| constant | at 12 FPS | at 60 FPS |
+|---|---|---|
+| `VIOLATION_FRAMES = 5` | 417 ms | 83 ms |
+| EMA `alpha = 0.25` | slow | 5× faster |
+
+So a fault must be held five times longer at 12 FPS before it counts, and the smoothing time
+constant moves with the frame rate too. **Any threshold tuned at one frame rate does not
+transfer to another.** Converting both to milliseconds using real frame timestamps would remove
+the coupling.
+
 ### What still needs real video
 
 1. Record 10–20 clips per exercise, deliberately split good-form / bad-form, labelled per rep.
